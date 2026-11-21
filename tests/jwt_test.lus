@@ -1,0 +1,116 @@
+local ROOT = string.match(TEST_DIR, "^(.*)[/\\][^/\\]*$")
+pledge("load", "fs:read=" .. ROOT .. "/*")
+package.path = ROOT .. "/?.lus;" .. package.path
+
+local jwt = require("jwt")
+
+local NOW = 1700000000
+local function clock() return NOW end
+
+local function code_of(fn, ...)
+    local ok, err = catch fn(...)
+    assert(not ok, "expected an error")
+    assert(jwt.iserror(err), tostring(err))
+    return err.code
+end
+
+-- The example token of jwt.io, signed with HS256.
+local EXAMPLE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    .. "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+    .. "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+local function known_token_test()
+    local claims, header = jwt.verify(EXAMPLE, "your-256-bit-secret", { algorithms = { "HS256" } })
+    assert(claims.name == "John Doe" and claims.iat == 1516239022)
+    assert(header.alg == "HS256")
+    assert(code_of(jwt.verify, EXAMPLE, "wrong", { algorithms = { "HS256" } }) == "signature")
+end
+
+local function sign_reproduces_known_token_test()
+    local token = jwt.sign({ sub = "1234567890", name = "John Doe", iat = 1516239022 }, "your-256-bit-secret")
+    local claims = jwt.verify(token, "your-256-bit-secret", { algorithms = { "HS256" } })
+    assert(claims.sub == "1234567890")
+    assert(token:match("%.([^.]*)$") ~= nil)
+end
+
+local function hmac_algorithms_test()
+    for _, alg in ipairs({ "HS256", "HS384", "HS512" }) do
+        local token = jwt.sign({ n = 1 }, "secret", { alg = alg, clock = clock })
+        local claims, header = jwt.verify(token, "secret", { algorithms = { alg }, clock = clock })
+        assert(claims.n == 1 and claims.iat == NOW and header.alg == alg)
+    end
+end
+
+local function eddsa_test()
+    local secret, public = crypto.keypair()
+    local token = jwt.sign({ sub = "42" }, secret, { alg = "EdDSA", header = { kid = "k1" } })
+    local claims, header = jwt.verify(token, public, { algorithms = { "EdDSA" } })
+    assert(claims.sub == "42" and header.kid == "k1")
+    local _, other = crypto.keypair()
+    assert(code_of(jwt.verify, token, other, { algorithms = { "EdDSA" } }) == "signature")
+end
+
+local function algorithm_must_be_accepted_test()
+    local token = jwt.sign({}, "secret", { alg = "HS512" })
+    assert(code_of(jwt.verify, token, "secret", { algorithms = { "HS256" } }) == "algorithm")
+    local none = "eyJhbGciOiJub25lIn0.e30."
+    assert(code_of(jwt.verify, none, "secret", { algorithms = { "HS256" } }) == "algorithm")
+    assert(not catch jwt.verify(token, "secret"))
+    assert(not catch jwt.verify(token, "secret", { algorithms = {} }))
+end
+
+local function times_test()
+    local token = jwt.sign({}, "s", { expires_in = 60, not_before = 10, clock = clock })
+    local opts = { algorithms = { "HS256" } }
+    NOW = 1700000005
+    opts.clock = clock
+    assert(code_of(jwt.verify, token, "s", opts) == "not_yet_valid")
+    opts.leeway = 5
+    assert(jwt.verify(token, "s", opts))
+    opts.leeway = nil
+    NOW = 1700000060
+    assert(code_of(jwt.verify, token, "s", opts) == "expired")
+    NOW = 1700000000
+end
+
+local function claims_test()
+    local token = jwt.sign({}, "s", { issuer = "lus.dev", subject = "u1", audience = { "api", "web" }, clock = clock })
+    local function opts(extra)
+        local o = { algorithms = { "HS256" }, clock = clock }
+        for k, v in pairs(extra) do o[k] = v end
+        return o
+    end
+    assert(jwt.verify(token, "s", opts({ issuer = "lus.dev", subject = "u1", audience = "web" })))
+    assert(code_of(jwt.verify, token, "s", opts({ issuer = "other" })) == "claim")
+    assert(code_of(jwt.verify, token, "s", opts({ subject = "u2" })) == "claim")
+    assert(code_of(jwt.verify, token, "s", opts({ audience = "cli" })) == "claim")
+    NOW = NOW + 100
+    assert(code_of(jwt.verify, token, "s", opts({ max_age = 50 })) == "expired")
+    NOW = 1700000000
+end
+
+local function key_function_test()
+    local keys = { a = "secret-a", b = "secret-b" }
+    local token = jwt.sign({ x = 1 }, keys.b, { header = { kid = "b" } })
+    local claims = jwt.verify(token, function(header) return keys[header.kid] end, { algorithms = { "HS256" } })
+    assert(claims.x == 1)
+    local unknown = jwt.sign({}, "z", { header = { kid = "z" } })
+    assert(code_of(jwt.verify, unknown, function(header) return keys[header.kid] end, { algorithms = { "HS256" } }) == "signature")
+end
+
+local function malformed_test()
+    for _, token in ipairs({ "", "a.b", "a.b.c.d", "!!!.e30.AA", "e30.bm90IGpzb24.AA", 42 }) do
+        assert(code_of(jwt.verify, token, "s", { algorithms = { "HS256" } }) == "malformed", tostring(token))
+    end
+end
+
+local function decode_test()
+    local header, claims = jwt.decode(EXAMPLE)
+    assert(header.typ == "JWT" and claims.sub == "1234567890")
+end
+
+local function claims_table_unchanged_test()
+    local claims = { a = 1 }
+    jwt.sign(claims, "s", { expires_in = 10 })
+    assert(claims.exp == nil and claims.iat == nil)
+end

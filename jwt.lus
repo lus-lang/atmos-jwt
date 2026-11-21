@@ -1,0 +1,286 @@
+--- Signs and verifies JSON Web Tokens.
+---
+--- `jwt.sign` makes a token from a table of claims. `jwt.verify` checks a
+--- token and returns its claims. The algorithms are `HS256`, `HS384`,
+--- `HS512`, and `EdDSA` with Ed25519, computed by the standard library
+--- `crypto` module.
+---
+--- @package jwt
+--- @version 0.1.0
+--- @lus 2.0
+--- @license 0BSD
+--- @repository https://github.com/lus-lang/atmos-jwt
+
+local M = {}
+
+local HMAC = { HS256 = "sha256", HS384 = "sha384", HS512 = "sha512" }
+
+local JwtError = {}
+JwtError.__index = JwtError
+JwtError.__tostring = function(e) return e.message end
+
+local function raise(code, message)
+    error(setmetatable({ code = code, message = message }, JwtError), 0)
+end
+
+--- Returns true if `value` is an error object that `jwt` raised.
+---
+--- The error object has a `code` and a `message`. The codes are
+--- `"malformed"`, `"algorithm"`, `"signature"`, `"expired"`,
+--- `"not_yet_valid"`, and `"claim"`.
+--- @param value any The value to test.
+--- @return boolean
+function M.iserror(value)
+    return getmetatable(value) == JwtError
+end
+
+-- Base64url ---------------------------------------------------------------------
+
+local function b64url(data)
+    if type(data) == "string" then
+        data = vector.fromstring(data)
+    end
+    local text = string.transcode(data, "binary", "base64")
+    return (text:gsub("=+$", ""):gsub("+", "-"):gsub("/", "_"))
+end
+
+-- Decodes base64url text into a vector, or returns nil when it is invalid.
+local function unb64url(text)
+    if type(text) ~= "string" or text:find("[^%w%-_]") then
+        return nil
+    end
+    local padded = text:gsub("-", "+"):gsub("_", "/")
+    local rest = #padded % 4
+    if rest == 1 then
+        return nil
+    elseif rest > 0 then
+        padded = padded .. string.rep("=", 4 - rest)
+    end
+    local ok, bytes = catch string.transcode(padded, "base64", "binary")
+    if not ok then
+        return nil
+    end
+    return bytes
+end
+
+local function as_text(bytes)
+    if type(bytes) == "string" then
+        return bytes
+    end
+    return vector.tostring(bytes)
+end
+
+-- Signatures --------------------------------------------------------------------
+
+local function signature(alg, key, input)
+    local hash = HMAC[alg]
+    if hash then
+        if type(key) ~= "string" and type(key) ~= "vector" then
+            error(`jwt: $alg needs a string or vector key`, 3)
+        end
+        return crypto.hmac(hash, key, input)
+    elseif alg == "EdDSA" then
+        if type(key) ~= "vector" or vector.size(key) ~= 32 then
+            error("jwt: EdDSA needs the 32-byte secret key of crypto.keypair", 3)
+        end
+        return crypto.sign(key, input)
+    end
+    error(`jwt: unsupported algorithm '$alg'`, 3)
+end
+
+local function check_signature(alg, key, input, sig)
+    local hash = HMAC[alg]
+    if hash then
+        return crypto.equal(crypto.hmac(hash, key, input), sig)
+    end
+    if type(key) ~= "vector" or vector.size(key) ~= 32 then
+        error("jwt: EdDSA verification needs the 32-byte public key of crypto.keypair", 3)
+    end
+    if vector.size(sig) ~= 64 then
+        return false
+    end
+    return crypto.verify(key, input, sig)
+end
+
+--- Signs `claims` and returns the token.
+---
+--- `options.alg` names the algorithm and defaults to `"HS256"`. For an HMAC
+--- algorithm, `key` is the secret as a string or a vector. For `EdDSA`, it is
+--- the 32-byte secret key of `crypto.keypair`. The other options add claims:
+--- `expires_in` sets `exp` that many seconds ahead, `not_before` sets `nbf`,
+--- `issuer`, `subject`, `audience`, and `id` set `iss`, `sub`, `aud`, and
+--- `jti`. `iat` is the current time unless `options.iat` is `false`.
+--- `options.header` adds fields to the header, such as `kid`. The table
+--- `claims` is not changed.
+--- @param claims table The claims.
+--- @param key string|vector The signing key.
+--- @param options table? The options.
+--- @return string
+function M.sign(claims, key, options)
+    options = options or {}
+    local alg = options.alg or "HS256"
+    if HMAC[alg] == nil and alg ~= "EdDSA" then
+        error(`jwt: unsupported algorithm '$alg'`, 2)
+    end
+    local now = (options.clock or os.time)()
+    local body = {}
+    for k, v in pairs(claims) do
+        body[k] = v
+    end
+    if options.iat ~= false and body.iat == nil then
+        body.iat = now
+    end
+    if options.expires_in then
+        body.exp = now + options.expires_in
+    end
+    if options.not_before then
+        body.nbf = now + options.not_before
+    end
+    body.iss = options.issuer or body.iss
+    body.sub = options.subject or body.sub
+    body.aud = options.audience or body.aud
+    body.jti = options.id or body.jti
+    local header = { alg = alg, typ = "JWT" }
+    for k, v in pairs(options.header or {}) do
+        header[k] = v
+    end
+    local input = b64url(tojson(header)) .. "." .. b64url(tojson(body))
+    return input .. "." .. b64url(signature(alg, key, input))
+end
+
+local function split(token)
+    if type(token) ~= "string" then
+        raise("malformed", "token is not a string")
+    end
+    local h, p, s = token:match("^([^.]*)%.([^.]*)%.([^.]*)$")
+    if h == nil then
+        raise("malformed", "token does not have three parts")
+    end
+    local hb, pb, sb = unb64url(h), unb64url(p), unb64url(s)
+    if hb == nil or pb == nil or sb == nil then
+        raise("malformed", "token part is not base64url")
+    end
+    local ok1, header = catch fromjson(as_text(hb))
+    local ok2, claims = catch fromjson(as_text(pb))
+    if not ok1 or type(header) ~= "table" then
+        raise("malformed", "token header is not a JSON object")
+    end
+    if not ok2 or type(claims) ~= "table" then
+        raise("malformed", "token claims are not a JSON object")
+    end
+    if type(sb) == "string" then
+        sb = vector.fromstring(sb)
+    end
+    return header, claims, h .. "." .. p, sb
+end
+
+--- Returns the header and the claims of a token without verifying it.
+---
+--- Use it only to read a field such as `kid` before `verify`. A malformed
+--- token raises an error object with code `"malformed"`.
+--- @param token string The token.
+--- @return table The header.
+--- @return table The claims.
+function M.decode(token)
+    local header, claims = split(token)
+    return header, claims
+end
+
+local function has_audience(aud, wanted)
+    local list = type(wanted) == "table" and wanted or { wanted }
+    local given = type(aud) == "table" and aud or { aud }
+    for _, w in ipairs(list) do
+        for _, a in ipairs(given) do
+            if a == w then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- Verifies a token and returns its claims and its header.
+---
+--- `options.algorithms` is required and lists the accepted algorithms, so a
+--- token cannot choose its own. `key` is the HMAC secret or the 32-byte
+--- Ed25519 public key. It may also be a function that receives the header
+--- and returns the key, which selects a key by `kid`.
+---
+--- The checks run in this order, and the first failure raises an error
+--- object with its code: the format (`"malformed"`), the algorithm
+--- (`"algorithm"`), the signature (`"signature"`), `exp` (`"expired"`),
+--- `nbf` (`"not_yet_valid"`), then `iss`, `sub`, `aud`, and `max_age`
+--- against the options of the same names (`"claim"`). `leeway` gives
+--- seconds of tolerance for the times and defaults to 0. `max_age` requires
+--- `iat` and limits the age of the token in seconds.
+--- @param token string The token.
+--- @param key string|vector|function The verification key.
+--- @param options table The options.
+--- @return table The claims.
+--- @return table The header.
+function M.verify(token, key, options)
+    if options == nil or type(options.algorithms) ~= "table" or #options.algorithms == 0 then
+        error("jwt.verify: options.algorithms must list the accepted algorithms", 2)
+    end
+    local header, claims, input, sig = split(token)
+    local alg = header.alg
+    local accepted = false
+    for _, a in ipairs(options.algorithms) do
+        if a == alg then
+            accepted = true
+        end
+    end
+    if not accepted or (HMAC[alg] == nil and alg ~= "EdDSA") then
+        raise("algorithm", `algorithm '$(tostring(alg))' is not accepted`)
+    end
+    if type(key) == "function" then
+        key = key(header)
+        if key == nil then
+            raise("signature", "no key for this token")
+        end
+    end
+    if not check_signature(alg, key, input, sig) then
+        raise("signature", "invalid signature")
+    end
+    local now = (options.clock or os.time)()
+    local leeway = options.leeway or 0
+    if claims.exp ~= nil then
+        if type(claims.exp) ~= "number" then
+            raise("malformed", "exp is not a number")
+        end
+        if now >= claims.exp + leeway then
+            raise("expired", "token expired")
+        end
+    end
+    if claims.nbf ~= nil then
+        if type(claims.nbf) ~= "number" then
+            raise("malformed", "nbf is not a number")
+        end
+        if now + leeway < claims.nbf then
+            raise("not_yet_valid", "token is not valid yet")
+        end
+    end
+    if options.issuer ~= nil then
+        local ok = claims.iss ~= nil and has_audience(claims.iss, options.issuer)
+        if not ok then
+            raise("claim", "unexpected issuer")
+        end
+    end
+    if options.subject ~= nil and claims.sub ~= options.subject then
+        raise("claim", "unexpected subject")
+    end
+    if options.audience ~= nil and (claims.aud == nil or not has_audience(claims.aud, options.audience)) then
+        raise("claim", "unexpected audience")
+    end
+    if options.max_age ~= nil then
+        if type(claims.iat) ~= "number" then
+            raise("claim", "max_age needs an iat claim")
+        end
+        if now - claims.iat > options.max_age + leeway then
+            raise("expired", "token is older than max_age")
+        end
+    end
+    return claims, header
+end
+
+return M

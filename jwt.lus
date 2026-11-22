@@ -73,8 +73,7 @@ end
 -- Signatures --------------------------------------------------------------------
 
 local function signature(alg, key, input)
-    local hash = HMAC[alg]
-    if hash then
+    if hash = HMAC[alg] then
         if type(key) ~= "string" and type(key) ~= "vector" then
             error(`jwt: $alg needs a string or vector key`, 3)
         end
@@ -89,8 +88,7 @@ local function signature(alg, key, input)
 end
 
 local function check_signature(alg, key, input, sig)
-    local hash = HMAC[alg]
-    if hash then
+    if hash = HMAC[alg] then
         return crypto.equal(crypto.hmac(hash, key, input), sig)
     end
     if type(key) ~= "vector" or vector.size(key) ~= 32 then

@@ -1,19 +1,22 @@
---- Signs and verifies JSON Web Tokens.
+--- Signs and verifies JSON Web Tokens with HMAC secrets and with RSA, ECDSA, and Ed25519 keys.
 ---
 --- `jwt.sign` makes a token from a table of claims. `jwt.verify` checks a
---- token and returns its claims. The algorithms are `HS256`, `HS384`,
---- `HS512`, and `EdDSA` with Ed25519, computed by the standard library
---- `crypto` module.
+--- token and returns its claims. The algorithms are `HS256`, `HS384`, and
+--- `HS512` with a secret, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, and
+--- `PS512` with an RSA key, `ES256` with a P-256 key, `ES384` with a P-384
+--- key, and `EdDSA` with an Ed25519 key. The standard library `crypto` module
+--- computes every signature.
 ---
---- With a key object of `crypto.importkey` or `crypto.keypair`, a PEM
---- string, or a JWK table, the algorithms are also `RS256`, `RS384`, `RS512`,
---- `PS256`, `PS384`, `PS512`, `ES256`, and `ES384`. `jwt.jwks` selects the key
---- of a token from a JWKS document. Each key verifies only the algorithms of
---- its own type, so a token cannot have an RSA public key checked as an HMAC
---- secret.
+--- A key is a secret as a string or a vector, an Ed25519 key of
+--- `crypto.keypair` as a vector of 32 bytes, a key object of
+--- `crypto.importkey` or `crypto.keypair`, a PEM string, or a JWK table.
+--- `jwt.jwks` selects the key of a token from a JWKS document. Each key
+--- verifies only the algorithms of its own type, so a token cannot have an
+--- RSA public key checked as an HMAC secret. `jwt.verify` therefore needs a
+--- list of accepted algorithms only when the key is an HMAC secret.
 ---
 --- @package jwt
---- @version 0.1.0
+--- @version 1.0.0
 --- @lus 2.0
 --- @license 0BSD
 --- @repository https://github.com/lus-lang/atmos-jwt
@@ -99,7 +102,7 @@ local function is_pem(text)
 end
 
 -- Sorts a key into a secret or a key object. Returns the kind, which is
--- "secret" or "key", then the secret or the key object, then the algorithm
+-- "secret", "oct" for the secret of a JWK, or "key", then the secret or the key object, then the algorithm
 -- that a JWK names for itself. Returns nil and a message for any other value.
 local function classify(key)
     local t = type(key)
@@ -142,7 +145,7 @@ local function classify(key)
             if type(secret) == "string" then
                 secret = vector.fromstring(secret)
             end
-            return "secret", secret, alg
+            return "oct", secret, alg
         end
         local object = jwk_cache[key]
         if object == nil then
@@ -163,7 +166,9 @@ local function fits(alg, kind, key, pinned)
     if pinned ~= nil and pinned ~= alg then
         return false
     end
-    if kind == "secret" then
+    if kind == "oct" then
+        return HMAC[alg] ~= nil
+    elseif kind == "secret" then
         -- A vector of 32 bytes is also an Ed25519 key of crypto.keypair().
         return HMAC[alg] ~= nil or (alg == "EdDSA" and type(key) == "vector" and vector.size(key) == 32)
     end
@@ -179,7 +184,7 @@ end
 -- Signatures --------------------------------------------------------------------
 
 local function signature(alg, kind, key, input)
-    if kind == "secret" then
+    if kind ~= "key" then
         if hash = HMAC[alg] then
             return crypto.hmac(hash, key, input)
         end
@@ -189,7 +194,7 @@ local function signature(alg, kind, key, input)
 end
 
 local function check_signature(alg, kind, key, input, sig)
-    if kind == "secret" then
+    if kind ~= "key" then
         if hash = HMAC[alg] then
             return crypto.equal(crypto.hmac(hash, key, input), sig)
         end
@@ -206,24 +211,31 @@ end
 
 --- Signs `claims` and returns the token.
 ---
---- `options.alg` names the algorithm and defaults to `"HS256"`. For an HMAC
---- algorithm, `key` is the secret as a string or a vector. For `EdDSA`, it is
---- the 32-byte secret key of `crypto.keypair`. The other options add claims:
---- `expires_in` sets `exp` that many seconds ahead, `not_before` sets `nbf`,
+--- `options.alg` names the algorithm, which must fit `key`. The HMAC
+--- algorithms `HS256`, `HS384`, and `HS512` take a secret as a string or a
+--- vector. `EdDSA` takes the 32-byte secret key of `crypto.keypair` or a
+--- private Ed25519 key object. The RSA algorithms `RS256`, `RS384`,
+--- `RS512`, `PS256`, `PS384`, and `PS512` take a private RSA key. `ES256`
+--- takes a private key on the curve P-256. `ES384` takes one on P-384. A
+--- private key is a key object of `crypto.importkey` or `crypto.keypair`, a
+--- PEM string, or a JWK table. A JWK of type `oct` is an HMAC secret.
+---
+--- A JWK with an `alg` field signs only with that algorithm, which is then
+--- the default of `options.alg`. For any other key, `options.alg` defaults
+--- to `HS256` for a secret, `RS256` for an RSA key, and the one algorithm of
+--- its curve for an EC or Ed25519 key.
+---
+--- The other options add claims. `expires_in` sets `exp` and `not_before`
+--- sets `nbf`, each that many seconds after the current time. The options
 --- `issuer`, `subject`, `audience`, and `id` set `iss`, `sub`, `aud`, and
---- `jti`. `iat` is the current time unless `options.iat` is `false`.
+--- `jti`, which replace the claims of the same names. `iat` is the current
+--- time unless `claims` has an `iat` or `options.iat` is `false`.
 --- `options.header` adds fields to the header, such as `kid`. The table
 --- `claims` is not changed.
 ---
---- `key` may also be a private key object of `crypto.importkey` or
---- `crypto.keypair`, a PEM string, or a JWK table. Such a key signs with the
---- algorithms of its type: the RSA algorithms `RS256`, `RS384`, `RS512`,
---- `PS256`, `PS384`, and `PS512`, `ES256` on the curve P-256, `ES384` on
---- P-384, and `EdDSA` with Ed25519. Without `options.alg`, an RSA key signs
---- with `RS256`, any other key object with the one algorithm of its type,
---- and a JWK with its `alg` field when it has one. A JWK of type `oct` is an
---- HMAC secret. An algorithm that the key cannot compute, a public key, and
---- a key that cannot be read each raise an error.
+--- `jwt.sign` raises an error if the algorithm is unknown or does not fit
+--- the key, if the key is a public key, or if the key cannot be read. These
+--- errors are strings, for which `jwt.iserror` returns false.
 --- @param claims table The claims.
 --- @param key string|vector|userdata|table The signing key.
 --- @param options table? The options.
@@ -236,7 +248,7 @@ function M.sign(claims, key, options)
     end
     local alg = options.alg or pinned
     if alg == nil then
-        if kind == "secret" then
+        if kind ~= "key" then
             alg = "HS256"
         elseif material.type == "rsa" then
             alg = "RS256"
@@ -250,7 +262,7 @@ function M.sign(claims, key, options)
     if not fits(alg, kind, material, pinned) then
         if kind == "secret" and alg == "EdDSA" then
             error("jwt: EdDSA needs the 32-byte secret key of crypto.keypair", 2)
-        elseif kind == "secret" then
+        elseif kind ~= "key" then
             error(`jwt: $alg needs a key object, a PEM string, or a JWK`, 2)
         elseif HMAC[alg] then
             error(`jwt: $alg needs a string or vector key`, 2)
@@ -339,33 +351,48 @@ end
 
 --- Verifies a token and returns its claims and its header.
 ---
---- `options.algorithms` is required and lists the accepted algorithms, so a
---- token cannot choose its own. `key` is the HMAC secret or the 32-byte
---- Ed25519 public key. It may also be a function that receives the header
---- and returns the key, which selects a key by `kid`.
+--- `key` is an HMAC secret as a string or a vector, the 32-byte Ed25519
+--- public key of `crypto.keypair`, a key object of `crypto.importkey` or
+--- `crypto.keypair`, a PEM string, or a JWK table. A private key verifies
+--- with its public half. `key` may also be a function that receives the
+--- header and returns the key, such as the function that `jwt.jwks`
+--- returns. A function that returns nil fails the token with the
+--- `"signature"` error.
 ---
---- The checks run in this order, and the first failure raises an error
---- object with its code: the format (`"malformed"`), the algorithm
---- (`"algorithm"`), the signature (`"signature"`), `exp` (`"expired"`),
---- `nbf` (`"not_yet_valid"`), then `iss`, `sub`, `aud`, and `max_age`
---- against the options of the same names (`"claim"`). `leeway` gives
---- seconds of tolerance for the times and defaults to 0. `max_age` requires
---- `iat` and limits the age of the token in seconds.
+--- `options.algorithms` lists the accepted algorithms. It is required when
+--- the key, or the key that a function returns, is an HMAC secret: a string
+--- that is not PEM text, a vector, or a JWK of type `oct`. For any other key
+--- it is optional. Without it, the accepted algorithms are those of the key
+--- type.
+--- Whatever the list holds, each key accepts only the algorithms of its
+--- type. A secret accepts `HS256`, `HS384`, and `HS512`. A vector of 32
+--- bytes also accepts `EdDSA`, as an Ed25519 public key. A JWK with an
+--- `alg` field accepts only that algorithm.
 ---
---- `key` may also be a key object of `crypto.importkey` or `crypto.keypair`,
---- a PEM string, a JWK table, or the function that `jwt.jwks` returns. A
---- private key verifies with its public half. Every key accepts only the
---- algorithms of its type whatever `options.algorithms` lists. A JWK with
---- an `alg` field accepts only that algorithm. A string that is not PEM
---- text, a vector, and a JWK of type `oct` are HMAC secrets that accept only
---- `HS256`, `HS384`, and `HS512`, except that a vector of 32 bytes is also an
---- Ed25519 public key. A token whose algorithm does not fit its key raises
---- the `"algorithm"` error. The algorithm `none` raises it with every key.
+--- The first check that fails raises an error object with the code of that
+--- check. The checks run in the following order.
 ---
---- `options.algorithms` may be absent when the key is a key object, a PEM
---- string, or a JWK that is not of type `oct`. The accepted algorithms are
---- then those of the key type. An HMAC secret without `options.algorithms`
---- and a key that cannot be read each raise an error.
+--- 1. The token must have three base64url parts whose first two are JSON
+---    objects (`"malformed"`).
+--- 2. The algorithm of the header must be in `options.algorithms` when the
+---    list is given, must be known, and must fit the key (`"algorithm"`).
+---    The algorithm `none` fails this check with every key.
+--- 3. The signature must verify (`"signature"`).
+--- 4. The time must be before `exp` (`"expired"`) and not before `nbf`
+---    (`"not_yet_valid"`). An `exp` or `nbf` that is not a number raises
+---    `"malformed"`.
+--- 5. `iss` must be `options.issuer` or one of its items, `sub` must be
+---    `options.subject`, and `aud` must contain `options.audience` or one of
+---    its items, for each option that is set (`"claim"`).
+--- 6. With `options.max_age`, the token must have an `iat` claim
+---    (`"claim"`) and be at most `max_age` seconds old (`"expired"`).
+---
+--- `options.leeway` is a tolerance in seconds for `exp`, `nbf`, and
+--- `max_age`. It defaults to 0.
+---
+--- `jwt.verify` raises a string error if the key cannot be read, if
+--- `options.algorithms` is absent for an HMAC secret, or if the list is
+--- present and empty or not a table.
 --- @param token string The token.
 --- @param key string|vector|userdata|table|function The verification key.
 --- @param options table? The options.

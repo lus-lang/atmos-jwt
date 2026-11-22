@@ -433,3 +433,15 @@ local function jwks_document_errors_test()
     assert(not catch jwt.jwks(42))
     assert(jwt.jwks({ keys = {} })({ alg = "RS256" }) == nil)
 end
+
+-- An oct JWK is an HMAC secret even when its k is 32 bytes long, so it never
+-- signs or verifies EdDSA as an Ed25519 key.
+local function oct_jwk_refuses_eddsa_test()
+    local secret, public = crypto.keypair()
+    local token = jwt.sign({ sub = "a" }, secret, { alg = "EdDSA" })
+    local as_oct = { kty = "oct", k = b64url(public) }
+    local ok, err = catch jwt.verify(token, as_oct, { algorithms = { "EdDSA" } })
+    assert(not ok and err.code == "algorithm")
+    raises(function() jwt.sign({ sub = "a" }, { kty = "oct", k = b64url(secret) }, { alg = "EdDSA" }) end, "EdDSA")
+    assert(jwt.verify(token, public, { algorithms = { "EdDSA" } }).sub == "a")
+end

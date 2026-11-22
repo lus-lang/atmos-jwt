@@ -1,6 +1,8 @@
 # jwt
 
-Signs and verifies JSON Web Tokens with HS256, HS384, HS512, and EdDSA.
+`jwt` signs and verifies JSON Web Tokens with HMAC secrets and with RSA, ECDSA, and Ed25519 keys. It reads keys from PEM text, JSON Web Keys, and JWKS documents. Each key verifies only the algorithms of its own type.
+
+The following example issues a token for a user that expires after an hour, then verifies it.
 
 ```lus nocheck
 local jwt = require("https://atmosp.here/2.0/jwt.lus")
@@ -10,6 +12,6 @@ local claims = jwt.verify(token, "secret", { algorithms = { "HS256" } })
 print(claims.sub)   --> 42
 ```
 
-The package requires Lus 2.0 with the RSA and ECDSA keys of `crypto`, which the `rewrite` branch of the Lus repository provides. It declares no permissions. It calls no `pledge` of its own, so the program that loads it keeps control of its permissions.
+The package requires Lus 2.0 with the RSA and ECDSA keys of `crypto` and declares no permissions. It never calls `pledge`, so the program that loads it keeps control of its permissions.
 
-The reference is in the doc comments of `jwt.lus`. Run `lus doc jwt.lus` to print it.
+The reference is in the doc comments of `jwt.lus`, which `lus doc jwt.lus` prints.

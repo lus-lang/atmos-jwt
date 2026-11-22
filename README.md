@@ -10,6 +10,6 @@ local claims = jwt.verify(token, "secret", { algorithms = { "HS256" } })
 print(claims.sub)   --> 42
 ```
 
-The package requires Lus 2.0. It declares no permissions. It calls no `pledge` of its own, so the program that loads it keeps control of its permissions.
+The package requires Lus 2.0 with the RSA and ECDSA keys of `crypto`, which the `rewrite` branch of the Lus repository provides. It declares no permissions. It calls no `pledge` of its own, so the program that loads it keeps control of its permissions.
 
 The reference is in the doc comments of `jwt.lus`. Run `lus doc jwt.lus` to print it.

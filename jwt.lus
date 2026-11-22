@@ -5,6 +5,13 @@
 --- `HS512`, and `EdDSA` with Ed25519, computed by the standard library
 --- `crypto` module.
 ---
+--- With a key object of `crypto.importkey` or `crypto.keypair`, a PEM
+--- string, or a JWK table, the algorithms are also `RS256`, `RS384`, `RS512`,
+--- `PS256`, `PS384`, `PS512`, `ES256`, and `ES384`. `jwt.jwks` selects the key
+--- of a token from a JWKS document. Each key verifies only the algorithms of
+--- its own type, so a token cannot have an RSA public key checked as an HMAC
+--- secret.
+---
 --- @package jwt
 --- @version 0.1.0
 --- @lus 2.0
@@ -70,34 +77,131 @@ local function as_text(bytes)
     return vector.tostring(bytes)
 end
 
+-- Keys --------------------------------------------------------------------------
+
+-- The key type that each asymmetric algorithm needs: "rsa", or the curve.
+local ASYMMETRIC = {
+    RS256 = "rsa", RS384 = "rsa", RS512 = "rsa",
+    PS256 = "rsa", PS384 = "rsa", PS512 = "rsa",
+    ES256 = "P-256", ES384 = "P-384", EdDSA = "Ed25519",
+}
+
+local CURVE_ALGORITHM = { ["P-256"] = "ES256", ["P-384"] = "ES384", ["Ed25519"] = "EdDSA" }
+
+-- Key objects imported from PEM strings and JWK tables. The PEM cache is
+-- emptied when it reaches PEM_CACHE_MAX entries.
+local pem_cache, pem_count = {}, 0
+local PEM_CACHE_MAX = 64
+local jwk_cache = setmetatable({}, { __mode = "k" })
+
+local function is_pem(text)
+    return text:find("^%s*%-%-%-%-%-BEGIN ") ~= nil
+end
+
+-- Sorts a key into a secret or a key object. Returns the kind, which is
+-- "secret" or "key", then the secret or the key object, then the algorithm
+-- that a JWK names for itself. Returns nil and a message for any other value.
+local function classify(key)
+    local t = type(key)
+    if t == "userdata" then
+        local ok, kind = catch key.type
+        if ok and (kind == "rsa" or kind == "ec" or kind == "ed25519") then
+            return "key", key
+        end
+        return nil, "key is not a crypto.key"
+    elseif t == "vector" then
+        return "secret", key
+    elseif t == "string" then
+        if not is_pem(key) then
+            return "secret", key
+        end
+        local object = pem_cache[key]
+        if object == nil then
+            local ok, imported = catch crypto.importkey(key)
+            if not ok then
+                return nil, "cannot read the PEM key: " .. tostring(imported)
+            end
+            if pem_count >= PEM_CACHE_MAX then
+                pem_cache, pem_count = {}, 0
+            end
+            pem_cache[key] = imported
+            pem_count = pem_count + 1
+            object = imported
+        end
+        return "key", object
+    elseif t == "table" then
+        local alg = key.alg
+        if alg ~= nil and type(alg) ~= "string" then
+            return nil, "the alg of the JWK is not a string"
+        end
+        if key.kty == "oct" then
+            local secret = unb64url(key.k)
+            if secret == nil then
+                return nil, "the k of the JWK is not base64url"
+            end
+            if type(secret) == "string" then
+                secret = vector.fromstring(secret)
+            end
+            return "secret", secret, alg
+        end
+        local object = jwk_cache[key]
+        if object == nil then
+            local ok, imported = catch crypto.importkey(key)
+            if not ok then
+                return nil, "cannot read the JWK: " .. tostring(imported)
+            end
+            jwk_cache[key] = imported
+            object = imported
+        end
+        return "key", object, alg
+    end
+    return nil, "key is a " .. t
+end
+
+-- Returns true if a key of this kind may sign and verify `alg`.
+local function fits(alg, kind, key, pinned)
+    if pinned ~= nil and pinned ~= alg then
+        return false
+    end
+    if kind == "secret" then
+        -- A vector of 32 bytes is also an Ed25519 key of crypto.keypair().
+        return HMAC[alg] ~= nil or (alg == "EdDSA" and type(key) == "vector" and vector.size(key) == 32)
+    end
+    local need = ASYMMETRIC[alg]
+    if need == nil then
+        return false
+    elseif need == "rsa" then
+        return key.type == "rsa"
+    end
+    return key.curve == need
+end
+
 -- Signatures --------------------------------------------------------------------
 
-local function signature(alg, key, input)
-    if hash = HMAC[alg] then
-        if type(key) ~= "string" and type(key) ~= "vector" then
-            error(`jwt: $alg needs a string or vector key`, 3)
-        end
-        return crypto.hmac(hash, key, input)
-    elseif alg == "EdDSA" then
-        if type(key) ~= "vector" or vector.size(key) ~= 32 then
-            error("jwt: EdDSA needs the 32-byte secret key of crypto.keypair", 3)
+local function signature(alg, kind, key, input)
+    if kind == "secret" then
+        if hash = HMAC[alg] then
+            return crypto.hmac(hash, key, input)
         end
         return crypto.sign(key, input)
     end
-    error(`jwt: unsupported algorithm '$alg'`, 3)
+    return crypto.sign(key, input, alg)
 end
 
-local function check_signature(alg, key, input, sig)
-    if hash = HMAC[alg] then
-        return crypto.equal(crypto.hmac(hash, key, input), sig)
+local function check_signature(alg, kind, key, input, sig)
+    if kind == "secret" then
+        if hash = HMAC[alg] then
+            return crypto.equal(crypto.hmac(hash, key, input), sig)
+        end
+        if vector.size(sig) ~= 64 then
+            return false
+        end
+        return crypto.verify(key, input, sig)
     end
-    if type(key) ~= "vector" or vector.size(key) ~= 32 then
-        error("jwt: EdDSA verification needs the 32-byte public key of crypto.keypair", 3)
+    if key.private then
+        key = key:public()
     end
-    if vector.size(sig) ~= 64 then
-        return false
-    end
-    return crypto.verify(key, input, sig)
+    return crypto.verify(key, input, sig, alg) == true
 end
 
 --- Signs `claims` and returns the token.
@@ -110,15 +214,51 @@ end
 --- `jti`. `iat` is the current time unless `options.iat` is `false`.
 --- `options.header` adds fields to the header, such as `kid`. The table
 --- `claims` is not changed.
+---
+--- `key` may also be a private key object of `crypto.importkey` or
+--- `crypto.keypair`, a PEM string, or a JWK table. Such a key signs with the
+--- algorithms of its type: the RSA algorithms `RS256`, `RS384`, `RS512`,
+--- `PS256`, `PS384`, and `PS512`, `ES256` on the curve P-256, `ES384` on
+--- P-384, and `EdDSA` with Ed25519. Without `options.alg`, an RSA key signs
+--- with `RS256`, any other key object with the one algorithm of its type,
+--- and a JWK with its `alg` field when it has one. A JWK of type `oct` is an
+--- HMAC secret. An algorithm that the key cannot compute, a public key, and
+--- a key that cannot be read each raise an error.
 --- @param claims table The claims.
---- @param key string|vector The signing key.
+--- @param key string|vector|userdata|table The signing key.
 --- @param options table? The options.
 --- @return string
 function M.sign(claims, key, options)
     options = options or {}
-    local alg = options.alg or "HS256"
-    if HMAC[alg] == nil and alg ~= "EdDSA" then
-        error(`jwt: unsupported algorithm '$alg'`, 2)
+    local kind, material, pinned = classify(key)
+    if kind == nil then
+        error("jwt.sign: " .. material, 2)
+    end
+    local alg = options.alg or pinned
+    if alg == nil then
+        if kind == "secret" then
+            alg = "HS256"
+        elseif material.type == "rsa" then
+            alg = "RS256"
+        else
+            alg = CURVE_ALGORITHM[material.curve]
+        end
+    end
+    if HMAC[alg] == nil and ASYMMETRIC[alg] == nil then
+        error(`jwt: unsupported algorithm '$(tostring(alg))'`, 2)
+    end
+    if not fits(alg, kind, material, pinned) then
+        if kind == "secret" and alg == "EdDSA" then
+            error("jwt: EdDSA needs the 32-byte secret key of crypto.keypair", 2)
+        elseif kind == "secret" then
+            error(`jwt: $alg needs a key object, a PEM string, or a JWK`, 2)
+        elseif HMAC[alg] then
+            error(`jwt: $alg needs a string or vector key`, 2)
+        end
+        error(`jwt: algorithm '$alg' does not fit the key`, 2)
+    end
+    if kind == "key" and not material.private then
+        error("jwt.sign: the key is a public key", 2)
     end
     local now = (options.clock or os.time)()
     local body = {}
@@ -142,8 +282,8 @@ function M.sign(claims, key, options)
     for k, v in pairs(options.header or {}) do
         header[k] = v
     end
-    local input = b64url(tojson(header)) .. "." .. b64url(tojson(body))
-    return input .. "." .. b64url(signature(alg, key, input))
+    local input = `$(b64url(tojson(header))).$(b64url(tojson(body)))`
+    return `$input.$(b64url(signature(alg, kind, material, input)))`
 end
 
 local function split(token)
@@ -169,7 +309,7 @@ local function split(token)
     if type(sb) == "string" then
         sb = vector.fromstring(sb)
     end
-    return header, claims, h .. "." .. p, sb
+    return header, claims, `$h.$p`, sb
 end
 
 --- Returns the header and the claims of a token without verifying it.
@@ -211,33 +351,71 @@ end
 --- against the options of the same names (`"claim"`). `leeway` gives
 --- seconds of tolerance for the times and defaults to 0. `max_age` requires
 --- `iat` and limits the age of the token in seconds.
+---
+--- `key` may also be a key object of `crypto.importkey` or `crypto.keypair`,
+--- a PEM string, a JWK table, or the function that `jwt.jwks` returns. A
+--- private key verifies with its public half. Every key accepts only the
+--- algorithms of its type whatever `options.algorithms` lists. A JWK with
+--- an `alg` field accepts only that algorithm. A string that is not PEM
+--- text, a vector, and a JWK of type `oct` are HMAC secrets that accept only
+--- `HS256`, `HS384`, and `HS512`, except that a vector of 32 bytes is also an
+--- Ed25519 public key. A token whose algorithm does not fit its key raises
+--- the `"algorithm"` error. The algorithm `none` raises it with every key.
+---
+--- `options.algorithms` may be absent when the key is a key object, a PEM
+--- string, or a JWK that is not of type `oct`. The accepted algorithms are
+--- then those of the key type. An HMAC secret without `options.algorithms`
+--- and a key that cannot be read each raise an error.
 --- @param token string The token.
---- @param key string|vector|function The verification key.
---- @param options table The options.
+--- @param key string|vector|userdata|table|function The verification key.
+--- @param options table? The options.
 --- @return table The claims.
 --- @return table The header.
 function M.verify(token, key, options)
-    if options == nil or type(options.algorithms) ~= "table" or #options.algorithms == 0 then
+    options = options or {}
+    local algorithms = options.algorithms
+    local kind, material, pinned
+    if type(key) ~= "function" then
+        kind, material, pinned = classify(key)
+        if kind == nil then
+            error("jwt.verify: " .. material, 2)
+        end
+    end
+    if algorithms == nil and kind ~= "key" and kind ~= nil
+        or algorithms ~= nil and (type(algorithms) ~= "table" or #algorithms == 0)
+    then
         error("jwt.verify: options.algorithms must list the accepted algorithms", 2)
     end
     local header, claims, input, sig = split(token)
     local alg = header.alg
-    local accepted = false
-    for _, a in ipairs(options.algorithms) do
-        if a == alg then
-            accepted = true
+    local accepted = algorithms == nil
+    if algorithms ~= nil then
+        for _, a in ipairs(algorithms) do
+            if a == alg then
+                accepted = true
+            end
         end
     end
-    if not accepted or (HMAC[alg] == nil and alg ~= "EdDSA") then
+    if not accepted or type(alg) ~= "string" or (HMAC[alg] == nil and ASYMMETRIC[alg] == nil) then
         raise("algorithm", `algorithm '$(tostring(alg))' is not accepted`)
     end
-    if type(key) == "function" then
+    if kind == nil then
         key = key(header)
         if key == nil then
             raise("signature", "no key for this token")
         end
+        kind, material, pinned = classify(key)
+        if kind == nil then
+            error("jwt.verify: " .. material, 2)
+        end
+        if algorithms == nil and kind ~= "key" then
+            error("jwt.verify: options.algorithms must list the accepted algorithms", 2)
+        end
     end
-    if not check_signature(alg, key, input, sig) then
+    if not fits(alg, kind, material, pinned) then
+        raise("algorithm", `algorithm '$alg' does not fit the key`)
+    end
+    if not check_signature(alg, kind, material, input, sig) then
         raise("signature", "invalid signature")
     end
     local now = (options.clock or os.time)()
@@ -279,6 +457,86 @@ function M.verify(token, key, options)
         end
     end
     return claims, header
+end
+
+-- Key sets ----------------------------------------------------------------------
+
+local JWK_TYPE = { rsa = "RSA", ["P-256"] = "EC", ["P-384"] = "EC", Ed25519 = "OKP" }
+
+-- Returns true if the JWK `entry` may verify a token with this header.
+local function candidate(entry, header)
+    if type(entry) ~= "table" or entry.use == "enc" then
+        return false
+    end
+    if header.kid ~= nil and entry.kid ~= header.kid then
+        return false
+    end
+    local alg = header.alg
+    if entry.alg ~= nil and entry.alg ~= alg then
+        return false
+    end
+    if HMAC[alg] then
+        return entry.kty == "oct"
+    end
+    local need = ASYMMETRIC[alg]
+    if need == nil or entry.kty ~= JWK_TYPE[need] then
+        return false
+    end
+    return need == "rsa" or entry.crv == need
+end
+
+--- Returns a function that selects the key of a token from a JWKS document.
+---
+--- `document` is a JSON Web Key Set as a table with a `keys` list, or the
+--- JSON text of one. The result is a function for the `key` argument of
+--- `jwt.verify`. It receives the header of a token and returns the JWK that
+--- fits it, or nil when the set has none, which makes `jwt.verify` raise the
+--- `"signature"` error.
+---
+--- A JWK fits a header when its key type and curve are those of the `alg`
+--- of the header, its own `alg` field is absent or equal, its `use` is not
+--- `"enc"`, and the runtime can read it. If the header has a `kid`, the
+--- function returns the first JWK with that `kid` that fits. Otherwise it
+--- returns the JWK that fits only when exactly one does. A header with the
+--- algorithm `none` or an unknown algorithm fits no key.
+---
+--- The following example verifies a token against the keys of its issuer.
+---
+--- ```lus nocheck
+--- local keys = jwt.jwks(jwks_json)
+--- local claims = jwt.verify(token, keys, { issuer = "https://issuer.example" })
+--- ```
+--- @param document table|string The JWKS document.
+--- @return function The key function.
+function M.jwks(document)
+    if type(document) == "string" then
+        local ok, decoded = catch fromjson(document)
+        if not ok then
+            error("jwt.jwks: the document is not JSON", 2)
+        end
+        document = decoded
+    end
+    if type(document) ~= "table" or type(document.keys) ~= "table" then
+        error("jwt.jwks: the document has no keys list", 2)
+    end
+    local keys = document.keys
+    return function(header)
+        if type(header) ~= "table" or type(header.alg) ~= "string" then
+            return nil
+        end
+        local found
+        for _, entry in ipairs(keys) do
+            if candidate(entry, header) and classify(entry) ~= nil then
+                if header.kid ~= nil then
+                    return entry
+                elseif found ~= nil then
+                    return nil
+                end
+                found = entry
+            end
+        end
+        return found
+    end
 end
 
 return M

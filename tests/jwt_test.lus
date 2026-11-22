@@ -1,6 +1,6 @@
 local ROOT = string.match(TEST_DIR, "^(.*)[/\\][^/\\]*$")
-pledge("load", "fs:read=" .. ROOT .. "/*")
-package.path = ROOT .. "/?.lus;" .. package.path
+pledge("load", `fs:read=$ROOT/*`)
+package.path = `$ROOT/?.lus;$(package.path)`
 
 local jwt = require("jwt")
 
@@ -113,4 +113,323 @@ local function claims_table_unchanged_test()
     local claims = { a = 1 }
     jwt.sign(claims, "s", { expires_in = 10 })
     assert(claims.exp == nil and claims.iat == nil)
+end
+
+-- Asymmetric keys -----------------------------------------------------------------
+
+-- These RSA keys exist only for the tests. They were generated with
+-- "openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048" and protect
+-- nothing.
+local RSA_PRIVATE = [[
+-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDH0ArVv/oc7R9A
+H0onz6zKUceBam/muQTPN8l4Ttxgp9KVc0GZj87yQBHSAMt1ZMAet/hl2LZU5l+E
+qU5IDUktL88HwvXYivudtRTIDpggvhb3CUg2RpAwuo/OGABc5AYzmM0hFH7HI478
+qmJLIK9X5UbAZbiR/ahsKC66hRfYwSAZ0JEiwCa+gIvU2SV7VWMaO/tMqQmt8+3N
+/RqcGMkNcmKheXBEUgRVFpPtvACv5vxIEpBaXs2YvjDHhIelwOaflG8rXgp1XGvp
+IwOKnnNWFEWuwlsb/b1H9jWI0uPBWZidAW9Y18XGLjm9lHqN9MlATcKeVMSErO7u
+fQK34xvvAgMBAAECggEAfw4KJbsqRoR9b5+13rTOsePokaFlwHd72Gwn3yl+NrPg
+Uwnz97qbJC2bZ0b8GQzUoXPoLpLr9fZ7XHbwAR75nhMdeVj+TRCrSLAho8ir8X4O
+Sk2Lrn+WJnYrBSj76hVQ4DRUk6ldqDEzNfT+Bbml5aU0JRlJkQOTuhqfBBmnfTrH
+0FLH1owpck8lVOQGG/NKjjlXIBGf9nRd5GNBPrDUxZLz5FOzbqcfLsWlXin9jyiS
+/luiuPAmAK+i+XF8J2FcfG5I9nohIqwDQpsA91W8XDOrA4WlmRXbO+N1zhdeNJ8R
+Dl9vVHOZV5/Iunc9mnueqKDkyU7gVzSshPvzmB0s2QKBgQD4d8Y1l4iqJlXWt4uh
+f1qMZvote31MyJ+9Ghm7Ik87RpUnsHZmyigmj5TWKuvDxboQk5pfeWEvpoUnaRny
+7TY2qkd0RckWUOFQpoRt9HqwTIIPtRwHslkXmsXyrefGvRh+N0AF2noz8Jjtce23
+XEKijPuRjrRhKHynfNuraoRzPQKBgQDN3q5gYFtIShjboZqUkIj/l2lCPOpmaDeX
+lpjdr3Piy1tAnBra7EFbv35pLaOfX/ld/0N7oVySGnZMHm74NWoyjg/OFBWUX5Hz
+9ZC7/aiIqQOluotIh19v+0ZgyXPeU6IihBMd34fj+Mz1S75mi80QJdMNXMkWjYeU
+cwWWDzQOmwKBgA72z7YskSuGMYdD+KHaVK6+CPUyScKVFqHB76jIkTMFtjf0tbzN
+Egv4e8NGRHq+7szOxu5XFhZTlhNgjhKGXMyABtum1EyGxHsh/DnPDpCNmwutIaoJ
+ALqeNKu/84SRoOcBFtcDaHa2V899HA79/Hljukby7EQptxAzQduaB64VAoGAIcP9
+O8dyEVg93YAS930BS1KNLBULqQI84/sKVYnaav9Jlz5DVVbcnWy6EgwvQwudveIJ
+MnTT1w7KClAPiVxRb7tHMliu9Wf7a1UCiSLgipGWDI+dGqdBav9+mo9QFs4G0Lxy
+2jp4clazXyQuNWmGl7hsdkuam71Y2GtJJkSWGDMCgYAI7viiErGZm7b39eShyBBC
+Ab1w9MG2FUfg55Xvgvy+JPdODUUQqvaf6Aw/x4m8YJeGRZIqz9bX8DBMbJ8DIZfR
++U2vbrCJ72OU7EI17Xh9MZntaQFyWCZVXYMnKiau6kFCMswIVLncnhEPR+i0eCzK
+lHYt9XaEaiAcvzpn++K9gg==
+-----END PRIVATE KEY-----
+]]
+
+local RSA_PUBLIC = [[
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx9AK1b/6HO0fQB9KJ8+s
+ylHHgWpv5rkEzzfJeE7cYKfSlXNBmY/O8kAR0gDLdWTAHrf4Zdi2VOZfhKlOSA1J
+LS/PB8L12Ir7nbUUyA6YIL4W9wlINkaQMLqPzhgAXOQGM5jNIRR+xyOO/KpiSyCv
+V+VGwGW4kf2obCguuoUX2MEgGdCRIsAmvoCL1Nkle1VjGjv7TKkJrfPtzf0anBjJ
+DXJioXlwRFIEVRaT7bwAr+b8SBKQWl7NmL4wx4SHpcDmn5RvK14KdVxr6SMDip5z
+VhRFrsJbG/29R/Y1iNLjwVmYnQFvWNfFxi45vZR6jfTJQE3CnlTEhKzu7n0Ct+Mb
+7wIDAQAB
+-----END PUBLIC KEY-----
+]]
+
+-- The public half of a second test key.
+local OTHER_RSA_PUBLIC = [[
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3+9zyzzKVrUBlSdhG9r/
+qaAMG5wlx1PZl50pKBOXUyu0OCvR8FZv8MgYdE0qcI8lvOJmj8gDre+e2qMl9fZ3
+X9nFn2qjSSsa+1AY/EnPJun9uv3/M3EFpoiaZkgKhPF7OgL2o5ROAn/gZAfZRUpw
+5JbCKkTbGp6VnXyOfhxfoH4djs3YiAfqYenbSU7eybMFZgiIAYuMMAmQhb46pFpY
+vIbIirLKIL8UrW9gnq4OhcmHQYWXGS6Kx2jy/qOfFH35GbqdCGVhh41TIV6JIW13
+xBWicMtW0JbGQBz5L0KSF2d3PVNdo2A9CZ46xwGBMCmAO1M6iCACFPyIdatGK1D4
+nQIDAQAB
+-----END PUBLIC KEY-----
+]]
+
+local function b64url(data)
+    return (string.transcode(data, "binary", "base64"):gsub("=+$", ""):gsub("+", "-"):gsub("/", "_"))
+end
+
+-- Builds an HMAC token by hand, with any value as the secret.
+local function forge(alg, hash, secret, claims)
+    local input = `$(b64url(tojson({ alg = alg, typ = "JWT" }))).$(b64url(tojson(claims)))`
+    return `$input.$(b64url(crypto.hmac(hash, secret, input)))`
+end
+
+local function rsa_algorithms_test()
+    for _, alg in ipairs({ "RS256", "RS384", "RS512", "PS256", "PS384", "PS512" }) do
+        local token = jwt.sign({ sub = alg }, RSA_PRIVATE, { alg = alg })
+        local claims, header = jwt.verify(token, RSA_PUBLIC, { algorithms = { alg } })
+        assert(claims.sub == alg and header.alg == alg)
+        assert(code_of(jwt.verify, token, OTHER_RSA_PUBLIC, { algorithms = { alg } }) == "signature", alg)
+        local other = alg:sub(1, 2) == "RS" and "PS" .. alg:sub(3) or "RS" .. alg:sub(3)
+        assert(code_of(jwt.verify, token, RSA_PUBLIC, { algorithms = { other } }) == "algorithm", alg)
+    end
+end
+
+local function rsa_key_object_test()
+    local secret = crypto.importkey(RSA_PRIVATE)
+    local token = jwt.sign({ n = 1 }, secret)
+    local header = jwt.decode(token)
+    assert(header.alg == "RS256")
+    assert(jwt.verify(token, secret:public()).n == 1)
+    -- A private key verifies with its public half.
+    assert(jwt.verify(token, secret, { algorithms = { "RS256" } }).n == 1)
+    local broken = token:sub(1, -5) .. (token:sub(-4) == "AAAA" and "BBBB" or "AAAA")
+    assert(code_of(jwt.verify, broken, RSA_PUBLIC) == "signature")
+end
+
+-- The RS256 example of RFC 7515, appendix A.2, with its public key.
+local RFC7515_KEY = {
+    kty = "RSA",
+    n = "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddxHmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT"
+        .. "-SFd2lZS-pCgNMsD1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSHSXndS5z5rexMdbBYUsLA9e-KXBd"
+        .. "QOS-UTo7WTBEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8NAco9_h9iaG"
+        .. "Nj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ",
+    e = "AQAB",
+}
+local RFC7515_TOKEN = "eyJhbGciOiJSUzI1NiJ9."
+    .. "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ."
+    .. "cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdb"
+    .. "F9CUAr7t1dnZcAcQjbKBYNX4BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K0GarZRmB_eSN9383"
+    .. "LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqvhJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWy"
+    .. "wlVmtVrBp0igcN_IoypGlUPQGe77Rw"
+
+local function rfc7515_rs256_test()
+    local before = function() return 1300819000 end
+    local claims = jwt.verify(RFC7515_TOKEN, RFC7515_KEY, { algorithms = { "RS256" }, clock = before })
+    assert(claims.iss == "joe" and claims.exp == 1300819380 and claims["http://example.com/is_root"] == true)
+    assert(code_of(jwt.verify, RFC7515_TOKEN, RFC7515_KEY, { algorithms = { "RS256" } }) == "expired")
+    assert(code_of(jwt.verify, RFC7515_TOKEN, RSA_PUBLIC, { clock = before }) == "signature")
+end
+
+local function ecdsa_test()
+    for alg, curve in pairs({ ES256 = "P-256", ES384 = "P-384" }) do
+        local secret, public = crypto.keypair(curve)
+        local token = jwt.sign({ sub = curve }, secret)
+        local claims, header = jwt.verify(token, public, { algorithms = { alg } })
+        assert(claims.sub == curve and header.alg == alg)
+        -- The signature is the raw r and s of JWS.
+        local sig = token:match("%.([^.]*)$")
+        assert(#sig == (curve == "P-256" and 86 or 128))
+        local _, stranger = crypto.keypair(curve)
+        assert(code_of(jwt.verify, token, stranger) == "signature")
+        -- PEM text of the same keys works too.
+        local again = jwt.sign({ sub = "pem" }, secret:export("pem"), { alg = alg })
+        assert(jwt.verify(again, public:export("pem")).sub == "pem")
+    end
+    local p256, p256_public = crypto.keypair("P-256")
+    local _, p384_public = crypto.keypair("P-384")
+    assert(not catch jwt.sign({}, p256, { alg = "ES384" }))
+    local token = jwt.sign({}, p256)
+    assert(code_of(jwt.verify, token, p384_public) == "algorithm")
+    assert(code_of(jwt.verify, token, p384_public, { algorithms = { "ES256", "ES384" } }) == "algorithm")
+    assert(jwt.verify(token, p256_public, { algorithms = { "ES256", "ES384" } }))
+end
+
+local function eddsa_key_object_test()
+    local secret, public = crypto.keypair()
+    local key = crypto.importkey({ kty = "OKP", crv = "Ed25519", x = b64url(public) })
+    local token = jwt.sign({ sub = "ed" }, secret, { alg = "EdDSA" })
+    assert(jwt.verify(token, key).sub == "ed")
+    assert(jwt.verify(token, { kty = "OKP", crv = "Ed25519", x = b64url(public) }).sub == "ed")
+    assert(code_of(jwt.verify, token, RSA_PUBLIC) == "algorithm")
+end
+
+local function jwk_test()
+    local secret, public = crypto.keypair("P-256")
+    local private_jwk, public_jwk = secret:export("jwk"), public:export("jwk")
+    local token = jwt.sign({ n = 7 }, private_jwk)
+    assert(jwt.verify(token, public_jwk).n == 7)
+    -- A JWK that names its algorithm accepts no other.
+    local rsa = crypto.importkey(RSA_PUBLIC):export("jwk")
+    rsa.alg = "PS256"
+    local rs = jwt.sign({}, RSA_PRIVATE, { alg = "RS256" })
+    local ps = jwt.sign({}, RSA_PRIVATE, { alg = "PS256" })
+    assert(code_of(jwt.verify, rs, rsa) == "algorithm")
+    assert(code_of(jwt.verify, rs, rsa, { algorithms = { "RS256" } }) == "algorithm")
+    assert(jwt.verify(ps, rsa))
+    -- An oct JWK is an HMAC secret.
+    local oct = { kty = "oct", k = b64url("your-256-bit-secret") }
+    assert(jwt.verify(EXAMPLE, oct, { algorithms = { "HS256" } }).name == "John Doe")
+    assert(jwt.sign({ sub = "1234567890", name = "John Doe", iat = 1516239022 }, oct) == EXAMPLE)
+    assert(not catch jwt.verify(EXAMPLE, oct))
+    assert(not catch jwt.verify(token, { kty = "EC", crv = "P-256", x = "AA", y = "AA" }))
+end
+
+local function sign_key_errors_test()
+    assert(not catch jwt.sign({}, RSA_PUBLIC, { alg = "RS256" }))
+    assert(not catch jwt.sign({}, RSA_PRIVATE, { alg = "HS256" }))
+    assert(not catch jwt.sign({}, RSA_PRIVATE, { alg = "ES256" }))
+    assert(not catch jwt.sign({}, "secret", { alg = "RS256" }))
+    assert(not catch jwt.sign({}, "secret", { alg = "none" }))
+    assert(not catch jwt.sign({}, "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n", { alg = "RS256" }))
+    assert(not catch jwt.sign({}, 42))
+end
+
+-- Algorithm confusion ---------------------------------------------------------------
+
+local function rsa_public() return RSA_PUBLIC end
+local function shared_secret() return "secret" end
+
+local function public_key_is_never_an_hmac_secret_test()
+    -- An attacker who knows the public key signs an HS256 token with its PEM
+    -- text as the secret.
+    for _, secret in ipairs({ RSA_PUBLIC, RSA_PUBLIC:gsub("%s+$", "") }) do
+        local forged = forge("HS256", "sha256", secret, { sub = "admin" })
+        assert(code_of(jwt.verify, forged, RSA_PUBLIC) == "algorithm")
+        assert(code_of(jwt.verify, forged, RSA_PUBLIC, { algorithms = { "HS256" } }) == "algorithm")
+        assert(code_of(jwt.verify, forged, RSA_PUBLIC, { algorithms = { "RS256", "HS256" } }) == "algorithm")
+        assert(code_of(jwt.verify, forged, crypto.importkey(RSA_PUBLIC), { algorithms = { "HS256" } }) == "algorithm")
+        assert(code_of(jwt.verify, forged, crypto.importkey(RSA_PUBLIC):export("jwk"), { algorithms = { "HS256" } }) == "algorithm")
+        assert(code_of(jwt.verify, forged, rsa_public, { algorithms = { "RS256", "HS256" } }) == "algorithm")
+    end
+    local _, ec = crypto.keypair("P-256")
+    local forged = forge("HS256", "sha256", ec:export("pem"), {})
+    assert(code_of(jwt.verify, forged, ec) == "algorithm")
+    assert(code_of(jwt.verify, forged, ec:export("pem"), { algorithms = { "HS256", "ES256" } }) == "algorithm")
+end
+
+local function hmac_secret_never_verifies_asymmetric_test()
+    local token = jwt.sign({ sub = "u" }, RSA_PRIVATE, { alg = "RS256" })
+    assert(code_of(jwt.verify, token, "secret", { algorithms = { "RS256" } }) == "algorithm")
+    assert(code_of(jwt.verify, token, "secret", { algorithms = { "HS256", "RS256" } }) == "algorithm")
+    assert(code_of(jwt.verify, token, vector.fromstring("secret"), { algorithms = { "RS256" } }) == "algorithm")
+    -- A token that claims RS256 over an HMAC of the secret fares no better.
+    local forged = forge("RS256", "sha256", "secret", {})
+    assert(code_of(jwt.verify, forged, "secret", { algorithms = { "RS256", "HS256" } }) == "algorithm")
+    local es = jwt.sign({}, (crypto.keypair("P-256")))
+    assert(code_of(jwt.verify, es, "secret", { algorithms = { "ES256" } }) == "algorithm")
+end
+
+local function none_is_never_accepted_test()
+    local claims = b64url(tojson({ sub = "admin" }))
+    for _, alg in ipairs({ "none", "None", "NONE", "nOnE" }) do
+        local token = `$(b64url(tojson({ alg = alg, typ = "JWT" }))).$claims.`
+        assert(code_of(jwt.verify, token, RSA_PUBLIC) == "algorithm")
+        assert(code_of(jwt.verify, token, RSA_PUBLIC, { algorithms = { alg } }) == "algorithm")
+        assert(code_of(jwt.verify, token, "secret", { algorithms = { alg, "HS256" } }) == "algorithm")
+        assert(code_of(jwt.verify, token, shared_secret, { algorithms = { alg } }) == "algorithm")
+    end
+    for _, header in ipairs({ {}, { alg = 5 }, { alg = { "RS256" } }, { alg = "" } }) do
+        local token = `$(b64url(tojson(header))).$claims.`
+        assert(code_of(jwt.verify, token, RSA_PUBLIC) == "algorithm")
+    end
+end
+
+local function algorithms_are_required_for_secrets_test()
+    local token = jwt.sign({}, "secret")
+    assert(not catch jwt.verify(token, "secret"))
+    assert(not catch jwt.verify(token, vector.fromstring("secret")))
+    assert(not catch jwt.verify(token, function() return "secret" end))
+    assert(not catch jwt.verify(token, RSA_PUBLIC, { algorithms = "RS256" }))
+end
+
+-- Key sets --------------------------------------------------------------------------
+
+local function make_set()
+    local ec_secret, ec_public = crypto.keypair("P-256")
+    local ec2_secret, ec2_public = crypto.keypair("P-256")
+    local rsa = crypto.importkey(RSA_PUBLIC):export("jwk")
+    rsa.kid, rsa.use, rsa.alg = "rsa-1", "sig", "RS256"
+    local ec = ec_public:export("jwk")
+    ec.kid = "ec-1"
+    local ec2 = ec2_public:export("jwk")
+    ec2.kid = "ec-2"
+    local encryption = crypto.importkey(OTHER_RSA_PUBLIC):export("jwk")
+    encryption.kid, encryption.use = "enc-1", "enc"
+    local document = {
+        keys = {
+            { kty = "EC", crv = "P-521", kid = "ec-1", x = "AA", y = "AA" },
+            { kty = "RSA", kid = "rsa-1", n = "AQAB", e = "AQAB" },
+            encryption, rsa, ec, ec2,
+        },
+    }
+    return document, ec_secret, ec2_secret
+end
+
+local function jwks_selects_by_kid_test()
+    local document, ec_secret, ec2_secret = make_set()
+    local keys = jwt.jwks(document)
+    local a = jwt.sign({ who = "a" }, ec_secret, { header = { kid = "ec-1" } })
+    local b = jwt.sign({ who = "b" }, ec2_secret, { header = { kid = "ec-2" } })
+    local r = jwt.sign({ who = "r" }, RSA_PRIVATE, { alg = "RS256", header = { kid = "rsa-1" } })
+    assert(jwt.verify(a, keys).who == "a" and jwt.verify(b, keys).who == "b" and jwt.verify(r, keys).who == "r")
+    assert(jwt.verify(r, keys, { algorithms = { "RS256" } }).who == "r")
+    -- The right kid with the key of another entry fails.
+    local crossed = jwt.sign({}, ec2_secret, { header = { kid = "ec-1" } })
+    assert(code_of(jwt.verify, crossed, keys) == "signature")
+    local unknown = jwt.sign({}, ec_secret, { header = { kid = "ec-9" } })
+    assert(code_of(jwt.verify, unknown, keys) == "signature")
+    assert(code_of(jwt.verify, a, keys, { algorithms = { "RS256" } }) == "algorithm")
+end
+
+local function jwks_selects_by_algorithm_test()
+    local document, ec_secret = make_set()
+    local keys = jwt.jwks(tojson(document))
+    -- One RSA signing key fits RS256, so a token without a kid finds it.
+    local r = jwt.sign({ who = "r" }, RSA_PRIVATE, { alg = "RS256" })
+    assert(jwt.verify(r, keys).who == "r")
+    -- Two keys fit ES256, so a token without a kid finds none.
+    local e = jwt.sign({}, ec_secret)
+    assert(code_of(jwt.verify, e, keys) == "signature")
+    -- The RSA entry names RS256, so it refuses PS256 even with its kid.
+    local ps = jwt.sign({}, RSA_PRIVATE, { alg = "PS256", header = { kid = "rsa-1" } })
+    assert(code_of(jwt.verify, ps, keys) == "signature")
+    -- An entry for encryption signs nothing.
+    assert(keys({ alg = "RS256", kid = "enc-1" }) == nil)
+    assert(keys({ alg = "none" }) == nil and keys({ alg = "HS256", kid = "rsa-1" }) == nil and keys({}) == nil)
+    assert(keys({ alg = "RS256", kid = "rsa-1" }).kid == "rsa-1")
+end
+
+local function jwks_refuses_confusion_test()
+    local document = make_set()
+    local keys = jwt.jwks(document)
+    local forged = forge("HS256", "sha256", RSA_PUBLIC, { sub = "admin" })
+    assert(code_of(jwt.verify, forged, keys, { algorithms = { "HS256", "RS256" } }) == "signature")
+    local none = `$(b64url(tojson({ alg = "none", kid = "rsa-1" }))).$(b64url("{}")).`
+    assert(code_of(jwt.verify, none, keys) == "algorithm")
+    -- A set with an oct key serves HMAC tokens only when the caller lists them.
+    local shared = jwt.jwks({ keys = { { kty = "oct", kid = "h", k = b64url("secret") } } })
+    local token = jwt.sign({ n = 1 }, "secret", { header = { kid = "h" } })
+    assert(jwt.verify(token, shared, { algorithms = { "HS256" } }).n == 1)
+    assert(not catch jwt.verify(token, shared))
+end
+
+local function jwks_document_errors_test()
+    assert(not catch jwt.jwks("not json"))
+    assert(not catch jwt.jwks({}))
+    assert(not catch jwt.jwks("[]"))
+    assert(not catch jwt.jwks(42))
+    assert(jwt.jwks({ keys = {} })({ alg = "RS256" }) == nil)
 end

@@ -5,7 +5,8 @@
 --- `HS512` with a secret, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, and
 --- `PS512` with an RSA key, `ES256` with a P-256 key, `ES384` with a P-384
 --- key, and `EdDSA` with an Ed25519 key. The standard library `crypto` module
---- computes every signature.
+--- computes every signature, so the RSA and ECDSA algorithms need a runtime
+--- whose `crypto` has RSA and ECDSA keys.
 ---
 --- A key is a secret as a string or a vector, an Ed25519 key of
 --- `crypto.keypair` as a vector of 32 bytes, a key object of
@@ -14,6 +15,17 @@
 --- verifies only the algorithms of its own type, so a token cannot have an
 --- RSA public key checked as an HMAC secret. `jwt.verify` therefore needs a
 --- list of accepted algorithms only when the key is an HMAC secret.
+---
+--- The following example issues a token for a user that expires after an
+--- hour, then verifies it.
+---
+--- ```lus nocheck
+--- local jwt = require("https://atmosp.here/2.0/jwt.lus")
+---
+--- local token = jwt.sign({ sub = "42" }, "secret", { expires_in = 3600 })
+--- local claims = jwt.verify(token, "secret", { algorithms = { "HS256" } })
+--- print(claims.sub)  --> 42
+--- ```
 ---
 --- @package jwt
 --- @version 1.0.0
@@ -27,7 +39,10 @@ local HMAC = { HS256 = "sha256", HS384 = "sha384", HS512 = "sha512" }
 
 local JwtError = {}
 JwtError.__index = JwtError
-JwtError.__tostring = function(e) return e.message end
+
+JwtError.__tostring = function(e)
+    return e.message
+end
 
 local function raise(code, message)
     error(setmetatable({ code = code, message = message }, JwtError), 0)
@@ -50,6 +65,7 @@ local function b64url(data)
     if type(data) == "string" then
         data = vector.fromstring(data)
     end
+
     local text = string.transcode(data, "binary", "base64")
     return (text:gsub("=+$", ""):gsub("+", "-"):gsub("/", "_"))
 end
@@ -59,24 +75,28 @@ local function unb64url(text)
     if type(text) ~= "string" or text:find("[^%w%-_]") then
         return nil
     end
+
     local padded = text:gsub("-", "+"):gsub("_", "/")
     local rest = #padded % 4
+
     if rest == 1 then
         return nil
     elseif rest > 0 then
         padded = padded .. string.rep("=", 4 - rest)
     end
-    local ok, bytes = catch string.transcode(padded, "base64", "binary")
-    if not ok then
-        return nil
+
+    if ok, bytes = catch string.transcode(padded, "base64", "binary") then
+        return bytes
     end
-    return bytes
+
+    return nil
 end
 
 local function as_text(bytes)
     if type(bytes) == "string" then
         return bytes
     end
+
     return vector.tostring(bytes)
 end
 
@@ -84,12 +104,18 @@ end
 
 -- The key type that each asymmetric algorithm needs: "rsa", or the curve.
 local ASYMMETRIC = {
-    RS256 = "rsa", RS384 = "rsa", RS512 = "rsa",
-    PS256 = "rsa", PS384 = "rsa", PS512 = "rsa",
-    ES256 = "P-256", ES384 = "P-384", EdDSA = "Ed25519",
+    RS256 = "rsa",
+    RS384 = "rsa",
+    RS512 = "rsa",
+    PS256 = "rsa",
+    PS384 = "rsa",
+    PS512 = "rsa",
+    ES256 = "P-256",
+    ES384 = "P-384",
+    EdDSA = "Ed25519",
 }
 
-local CURVE_ALGORITHM = { ["P-256"] = "ES256", ["P-384"] = "ES384", ["Ed25519"] = "EdDSA" }
+local CURVE_ALGORITHM = { ["P-256"] = "ES256", ["P-384"] = "ES384", Ed25519 = "EdDSA" }
 
 -- Key objects imported from PEM strings and JWK tables. The PEM cache is
 -- emptied when it reaches PEM_CACHE_MAX entries.
@@ -106,11 +132,14 @@ end
 -- that a JWK names for itself. Returns nil and a message for any other value.
 local function classify(key)
     local t = type(key)
+
     if t == "userdata" then
         local ok, kind = catch key.type
+
         if ok and (kind == "rsa" or kind == "ec" or kind == "ed25519") then
             return "key", key
         end
+
         return nil, "key is not a crypto.key"
     elseif t == "vector" then
         return "secret", key
@@ -118,47 +147,64 @@ local function classify(key)
         if not is_pem(key) then
             return "secret", key
         end
+
         local object = pem_cache[key]
+
         if object == nil then
             local ok, imported = catch crypto.importkey(key)
+
             if not ok then
-                return nil, "cannot read the PEM key: " .. tostring(imported)
+                return nil, `cannot read the PEM key: $imported`
             end
+
             if pem_count >= PEM_CACHE_MAX then
                 pem_cache, pem_count = {}, 0
             end
+
             pem_cache[key] = imported
             pem_count = pem_count + 1
             object = imported
         end
+
         return "key", object
     elseif t == "table" then
         local alg = key.alg
+
         if alg ~= nil and type(alg) ~= "string" then
             return nil, "the alg of the JWK is not a string"
         end
+
         if key.kty == "oct" then
             local secret = unb64url(key.k)
+
             if secret == nil then
                 return nil, "the k of the JWK is not base64url"
             end
+
             if type(secret) == "string" then
                 secret = vector.fromstring(secret)
             end
+
             return "oct", secret, alg
         end
+
         local object = jwk_cache[key]
+
         if object == nil then
             local ok, imported = catch crypto.importkey(key)
+
             if not ok then
-                return nil, "cannot read the JWK: " .. tostring(imported)
+                return nil, `cannot read the JWK: $imported`
             end
+
             jwk_cache[key] = imported
             object = imported
         end
+
         return "key", object, alg
     end
-    return nil, "key is a " .. t
+
+    return nil, `key is a $t`
 end
 
 -- Returns true if a key of this kind may sign and verify `alg`.
@@ -166,18 +212,22 @@ local function fits(alg, kind, key, pinned)
     if pinned ~= nil and pinned ~= alg then
         return false
     end
+
     if kind == "oct" then
         return HMAC[alg] ~= nil
     elseif kind == "secret" then
         -- A vector of 32 bytes is also an Ed25519 key of crypto.keypair().
-        return HMAC[alg] ~= nil or (alg == "EdDSA" and type(key) == "vector" and vector.size(key) == 32)
+        return HMAC[alg] ~= nil or (alg == "EdDSA" and type(key) == "vector" and #key == 32)
     end
+
     local need = ASYMMETRIC[alg]
+
     if need == nil then
         return false
     elseif need == "rsa" then
         return key.type == "rsa"
     end
+
     return key.curve == need
 end
 
@@ -188,8 +238,10 @@ local function signature(alg, kind, key, input)
         if hash = HMAC[alg] then
             return crypto.hmac(hash, key, input)
         end
+
         return crypto.sign(key, input)
     end
+
     return crypto.sign(key, input, alg)
 end
 
@@ -198,15 +250,24 @@ local function check_signature(alg, kind, key, input, sig)
         if hash = HMAC[alg] then
             return crypto.equal(crypto.hmac(hash, key, input), sig)
         end
-        if vector.size(sig) ~= 64 then
+
+        if #sig ~= 64 then
             return false
         end
+
         return crypto.verify(key, input, sig)
     end
+
     if key.private then
         key = key:public()
     end
+
     return crypto.verify(key, input, sig, alg) == true
+end
+
+-- The current Unix time in whole seconds, the default of `options.clock`.
+local function unix_now()
+    return time.now():epoch()
 end
 
 --- Signs `claims` and returns the token.
@@ -243,10 +304,13 @@ end
 function M.sign(claims, key, options)
     options = options or {}
     local kind, material, pinned = classify(key)
+
     if kind == nil then
-        error("jwt.sign: " .. material, 2)
+        error(`jwt.sign: $material`, 2)
     end
+
     local alg = options.alg or pinned
+
     if alg == nil then
         if kind ~= "key" then
             alg = "HS256"
@@ -256,9 +320,11 @@ function M.sign(claims, key, options)
             alg = CURVE_ALGORITHM[material.curve]
         end
     end
+
     if HMAC[alg] == nil and ASYMMETRIC[alg] == nil then
-        error(`jwt: unsupported algorithm '$(tostring(alg))'`, 2)
+        error(`jwt: unsupported algorithm '$alg'`, 2)
     end
+
     if not fits(alg, kind, material, pinned) then
         if kind == "secret" and alg == "EdDSA" then
             error("jwt: EdDSA needs the 32-byte secret key of crypto.keypair", 2)
@@ -267,33 +333,39 @@ function M.sign(claims, key, options)
         elseif HMAC[alg] then
             error(`jwt: $alg needs a string or vector key`, 2)
         end
+
         error(`jwt: algorithm '$alg' does not fit the key`, 2)
     end
+
     if kind == "key" and not material.private then
         error("jwt.sign: the key is a public key", 2)
     end
-    local now = (options.clock or os.time)()
-    local body = {}
-    for k, v in pairs(claims) do
-        body[k] = v
-    end
+
+    local now = (options.clock or unix_now)()
+    local body = table.clone(claims)
+
     if options.iat ~= false and body.iat == nil then
         body.iat = now
     end
+
     if options.expires_in then
         body.exp = now + options.expires_in
     end
+
     if options.not_before then
         body.nbf = now + options.not_before
     end
+
     body.iss = options.issuer or body.iss
     body.sub = options.subject or body.sub
     body.aud = options.audience or body.aud
     body.jti = options.id or body.jti
     local header = { alg = alg, typ = "JWT" }
+
     for k, v in pairs(options.header or {}) do
         header[k] = v
     end
+
     local input = `$(b64url(tojson(header))).$(b64url(tojson(body)))`
     return `$input.$(b64url(signature(alg, kind, material, input)))`
 end
@@ -302,25 +374,34 @@ local function split(token)
     if type(token) ~= "string" then
         raise("malformed", "token is not a string")
     end
+
     local h, p, s = token:match("^([^.]*)%.([^.]*)%.([^.]*)$")
+
     if h == nil then
         raise("malformed", "token does not have three parts")
     end
+
     local hb, pb, sb = unb64url(h), unb64url(p), unb64url(s)
+
     if hb == nil or pb == nil or sb == nil then
         raise("malformed", "token part is not base64url")
     end
+
     local ok1, header = catch fromjson(as_text(hb))
     local ok2, claims = catch fromjson(as_text(pb))
+
     if not ok1 or type(header) ~= "table" then
         raise("malformed", "token header is not a JSON object")
     end
+
     if not ok2 or type(claims) ~= "table" then
         raise("malformed", "token claims are not a JSON object")
     end
+
     if type(sb) == "string" then
         sb = vector.fromstring(sb)
     end
+
     return header, claims, `$h.$p`, sb
 end
 
@@ -339,6 +420,7 @@ end
 local function has_audience(aud, wanted)
     local list = type(wanted) == "table" and wanted or { wanted }
     local given = type(aud) == "table" and aud or { aud }
+
     for _, w in ipairs(list) do
         for _, a in ipairs(given) do
             if a == w then
@@ -346,6 +428,7 @@ local function has_audience(aud, wanted)
             end
         end
     end
+
     return false
 end
 
@@ -402,20 +485,24 @@ function M.verify(token, key, options)
     options = options or {}
     local algorithms = options.algorithms
     local kind, material, pinned
+
     if type(key) ~= "function" then
         kind, material, pinned = classify(key)
+
         if kind == nil then
-            error("jwt.verify: " .. material, 2)
+            error(`jwt.verify: $material`, 2)
         end
     end
+
     if algorithms == nil and kind ~= "key" and kind ~= nil
-        or algorithms ~= nil and (type(algorithms) ~= "table" or #algorithms == 0)
-    then
+        or algorithms ~= nil and (type(algorithms) ~= "table" or #algorithms == 0) then
         error("jwt.verify: options.algorithms must list the accepted algorithms", 2)
     end
+
     local header, claims, input, sig = split(token)
     local alg = header.alg
     local accepted = algorithms == nil
+
     if algorithms ~= nil then
         for _, a in ipairs(algorithms) do
             if a == alg then
@@ -423,66 +510,87 @@ function M.verify(token, key, options)
             end
         end
     end
+
     if not accepted or type(alg) ~= "string" or (HMAC[alg] == nil and ASYMMETRIC[alg] == nil) then
-        raise("algorithm", `algorithm '$(tostring(alg))' is not accepted`)
+        raise("algorithm", `algorithm '$alg' is not accepted`)
     end
+
     if kind == nil then
         key = key(header)
+
         if key == nil then
             raise("signature", "no key for this token")
         end
+
         kind, material, pinned = classify(key)
+
         if kind == nil then
-            error("jwt.verify: " .. material, 2)
+            error(`jwt.verify: $material`, 2)
         end
+
         if algorithms == nil and kind ~= "key" then
             error("jwt.verify: options.algorithms must list the accepted algorithms", 2)
         end
     end
+
     if not fits(alg, kind, material, pinned) then
         raise("algorithm", `algorithm '$alg' does not fit the key`)
     end
+
     if not check_signature(alg, kind, material, input, sig) then
         raise("signature", "invalid signature")
     end
-    local now = (options.clock or os.time)()
+
+    local now = (options.clock or unix_now)()
     local leeway = options.leeway or 0
+
     if claims.exp ~= nil then
         if type(claims.exp) ~= "number" then
             raise("malformed", "exp is not a number")
         end
+
         if now >= claims.exp + leeway then
             raise("expired", "token expired")
         end
     end
+
     if claims.nbf ~= nil then
         if type(claims.nbf) ~= "number" then
             raise("malformed", "nbf is not a number")
         end
+
         if now + leeway < claims.nbf then
             raise("not_yet_valid", "token is not valid yet")
         end
     end
+
     if options.issuer ~= nil then
         local ok = claims.iss ~= nil and has_audience(claims.iss, options.issuer)
+
         if not ok then
             raise("claim", "unexpected issuer")
         end
     end
+
     if options.subject ~= nil and claims.sub ~= options.subject then
         raise("claim", "unexpected subject")
     end
-    if options.audience ~= nil and (claims.aud == nil or not has_audience(claims.aud, options.audience)) then
+
+    if options.audience ~= nil
+        and (claims.aud == nil or not has_audience(claims.aud, options.audience)) then
         raise("claim", "unexpected audience")
     end
+
     if options.max_age ~= nil then
         if type(claims.iat) ~= "number" then
             raise("claim", "max_age needs an iat claim")
         end
+
         if now - claims.iat > options.max_age + leeway then
             raise("expired", "token is older than max_age")
         end
     end
+
     return claims, header
 end
 
@@ -495,20 +603,27 @@ local function candidate(entry, header)
     if type(entry) ~= "table" or entry.use == "enc" then
         return false
     end
+
     if header.kid ~= nil and entry.kid ~= header.kid then
         return false
     end
+
     local alg = header.alg
+
     if entry.alg ~= nil and entry.alg ~= alg then
         return false
     end
+
     if HMAC[alg] then
         return entry.kty == "oct"
     end
+
     local need = ASYMMETRIC[alg]
+
     if need == nil or entry.kty ~= JWK_TYPE[need] then
         return false
     end
+
     return need == "rsa" or entry.crv == need
 end
 
@@ -538,20 +653,27 @@ end
 function M.jwks(document)
     if type(document) == "string" then
         local ok, decoded = catch fromjson(document)
+
         if not ok then
             error("jwt.jwks: the document is not JSON", 2)
         end
+
         document = decoded
     end
+
     if type(document) ~= "table" or type(document.keys) ~= "table" then
         error("jwt.jwks: the document has no keys list", 2)
     end
+
     local keys = document.keys
+
     return function(header)
         if type(header) ~= "table" or type(header.alg) ~= "string" then
             return nil
         end
+
         local found
+
         for _, entry in ipairs(keys) do
             if candidate(entry, header) and classify(entry) ~= nil then
                 if header.kid ~= nil then
@@ -559,9 +681,11 @@ function M.jwks(document)
                 elseif found ~= nil then
                     return nil
                 end
+
                 found = entry
             end
         end
+
         return found
     end
 end
